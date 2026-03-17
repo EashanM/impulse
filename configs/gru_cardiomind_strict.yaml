@@ -1,0 +1,84 @@
+data:
+  wesad_root: "data/raw/WESAD"
+  processed_root: "data/processed_cardiomind_strict_ratio"
+  subjects: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17]
+  ecg_hz: 700
+  dataset: "wesad"
+
+preprocessing:
+  window_sec: 20
+  stride_sec: 1
+  pre_stress_window_sec: 60
+  labels_of_interest: [1, 2, 3, 4]
+  feature_profile: "cardiomind"
+
+features:
+  cardiac:
+    - mean_hr_bps
+    - std_hr_bps
+    - mean_rr_s
+    - std_rr_s
+    - rmssd_s
+    - nn50_count
+    - pnn50_pct
+    - hti
+    - tinn_ms
+    - mean_freq_hz
+    - std_freq_hz
+    - total_psd_power_ms2
+  somatic: []
+
+normalization:
+  method: "cardiomind_ratio"
+
+model:
+  encoder: "gru"
+  tcn:
+    num_channels: [64]
+    kernel_size: 3
+    dropout: 0.15
+    use_depthwise_separable: false
+  mlp:
+    hidden_dims: [64, 32]
+  embedding_dim: 32
+  actor_hidden: 32
+  critic_hidden: 32
+
+env:
+  seq_len: 30
+  consensus: "or"
+  random_start: true
+
+reward:
+  tp_reward: 50.0
+  tn_reward: 0.0
+  fp_penalty: -20.0
+  fn_penalty: -20.0
+  lead_time_scaling: true
+  lead_time_floor: 0.3
+  terminate_on_fp: true
+  fp_cap: null
+  fp_repeat_scale: 1.2
+  baseline_step_penalty: -0.01
+
+training:
+  lr: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  max_grad_norm: 0.5
+  ppo_epochs: 4
+  mini_batch_size: 512
+  episodes_per_update: 10
+  total_episodes: 500
+  seed: 42
+  checkpoint_dir: "runs"
+  log_interval: 10
+  warm_start_path: "runs/gru_supervised_warmstart.pt"
+  warm_start_mode: "encoder"
+
+evaluation:
+  loso: true
+  non_overlapping_test: true

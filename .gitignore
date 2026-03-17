@@ -1,0 +1,39 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Environments
+.venv/
+.env
+.python-version
+
+# Test and tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editor / OS
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Generated artifacts
+runs/
+plots/
+data/processed*/
+data/rl_episodes*/
+data/raw/
+checkpoints/
+
+# TensorBoard
+events.out.tfevents*

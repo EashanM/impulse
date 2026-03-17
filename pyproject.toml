@@ -1,0 +1,32 @@
+[project]
+name = "stress-rl"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "gymnasium>=1.2.3",
+    "heartpy>=1.2.7",
+    "scikit-learn>=1.0",
+    "matplotlib>=3.10.8",
+    "neurokit2>=0.2.12",
+    "numpy>=2.4.2",
+    "pandas>=3.0.1",
+    "pettingzoo>=1.25.0",
+    "pytest>=9.0.2",
+    "pywavelets>=1.9.0",
+    "pyyaml>=6.0.3",
+    "scipy>=1.17.1",
+    "tensorboard>=2.20.0",
+    "torch>=2.10.0",
+    "tqdm>=4.67.3",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

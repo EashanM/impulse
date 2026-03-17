@@ -1,0 +1,75 @@
+data:
+  wesad_root: "data/raw/WESAD"
+  processed_root: "data/processed"
+  # S12 is missing from the public WESAD release
+  subjects: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17]
+  ecg_hz: 700
+
+preprocessing:
+  window_sec: 30
+  stride_sec: 1
+  pre_stress_window_sec: 60   # unused; kept for config compatibility
+  labels_of_interest: [1, 2]  # 1=baseline, 2=stress
+  feature_profile: "default"  # "default" | "cardiomind"
+
+features:
+  cardiac:
+    - mean_hr
+    - pnn50
+    - rmssd
+  somatic:
+    - acc_variance
+    - acc_mag_slope
+    - temp_slope
+    - resp_irregularity
+
+normalization:
+  method: "per_subject_zscore"  # Z-score using only baseline (label=1) windows
+
+model:
+  encoder: "tcn"  # "tcn" or "mlp"
+  tcn:
+    num_channels: [32, 32, 32, 32]  # 4 blocks -> receptive field 61 (> seq_len=30)
+    kernel_size: 3
+    dropout: 0.15
+    use_depthwise_separable: true  # keep parameter count lightweight
+  mlp:
+    hidden_dims: [64, 32]
+  embedding_dim: 32
+  actor_hidden: 32
+  critic_hidden: 32
+
+env:
+  seq_len: 30  # number of past windows visible to each agent
+  consensus: "or"  # "or" = either triggers; "and" = both must alert
+  random_start: true  # randomize episode start to prevent step-counting
+
+reward:
+  tp_reward: 50.0
+  tn_reward: 0.0
+  fp_penalty: -5.0
+  fn_penalty: -10.0
+  lead_time_scaling: true   # scale TP reward by earliness within stress window
+  lead_time_floor: 0.3     # minimum scaling (late detection in stress still gets 0.3 * tp_reward)
+  terminate_on_fp: false
+  fp_cap: null  # no cap on FP penalty
+
+training:
+  lr: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_epsilon: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  max_grad_norm: 0.5
+  ppo_epochs: 4
+  mini_batch_size: 512
+  episodes_per_update: 10  # collect this many episodes before PPO update
+  total_episodes: 500
+  seed: 42
+  checkpoint_dir: "runs"
+  log_interval: 10  # print metrics every N episodes
+
+evaluation:
+  loso: true
+  non_overlapping_test: true  # use stride=window_sec at test time

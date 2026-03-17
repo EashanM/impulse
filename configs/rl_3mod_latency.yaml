@@ -1,0 +1,7 @@
+# RL Latency-Optimized Reward Configuration
+# Goal: Minimize detection latency (high TP reward, tolerate FPs)
+reward:
+  tp_reward: 5.0
+  fp_penalty: -0.5
+  fn_penalty: -2.0
+  fp_cap: -3.0

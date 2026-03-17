@@ -1,0 +1,7 @@
+# RL F1-Optimized Reward Configuration
+# Goal: Maximize F1 score (balanced TP/FP/FN penalties)
+reward:
+  tp_reward: 1.0
+  fp_penalty: -1.0
+  fn_penalty: -1.0
+  fp_cap: -10.0
