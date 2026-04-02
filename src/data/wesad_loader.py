@@ -27,7 +27,11 @@ import numpy as np
 class SubjectData:
     subject_id: int
     chest_ecg: np.ndarray   # (N,) float64, 700 Hz
+    chest_acc: np.ndarray   # (N, 3) float64, 700 Hz
     chest_eda: np.ndarray   # (N,) float64, 700 Hz
+    chest_emg: np.ndarray   # (N,) float64, 700 Hz
+    chest_resp: np.ndarray  # (N,) float64, 700 Hz
+    chest_temp: np.ndarray  # (N,) float64, 700 Hz
     wrist_eda: np.ndarray   # (M,) float64, 4 Hz
     labels: np.ndarray      # (N,) int, 700 Hz — aligned with chest signals
 
@@ -59,7 +63,11 @@ def load_subject(wesad_root: str, subject_id: int) -> SubjectData:
     labels = data["label"]
 
     chest_ecg = np.asarray(chest["ECG"]).flatten().astype(np.float64)
+    chest_acc = np.asarray(chest["ACC"]).astype(np.float64)  # (N, 3)
     chest_eda = np.asarray(chest["EDA"]).flatten().astype(np.float64)
+    chest_emg = np.asarray(chest["EMG"]).flatten().astype(np.float64)
+    chest_resp = np.asarray(chest["Resp"]).flatten().astype(np.float64)
+    chest_temp = np.asarray(chest["Temp"]).flatten().astype(np.float64)
     wrist_eda = np.asarray(wrist["EDA"]).flatten().astype(np.float64)
     labels = np.asarray(labels).flatten().astype(np.int32)
 
@@ -70,7 +78,11 @@ def load_subject(wesad_root: str, subject_id: int) -> SubjectData:
     return SubjectData(
         subject_id=subject_id,
         chest_ecg=chest_ecg,
+        chest_acc=chest_acc,
         chest_eda=chest_eda,
+        chest_emg=chest_emg,
+        chest_resp=chest_resp,
+        chest_temp=chest_temp,
         wrist_eda=wrist_eda,
         labels=labels,
     )

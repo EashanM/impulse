@@ -142,18 +142,19 @@ uv run python scripts/benchmark_gru_eda_strict.py --save-all-folds-dir runs/chec
 uv run python scripts/benchmark_bvp_cnn.py --save-all-folds-dir runs/checkpoints/bvp --epochs 30 --batch-size 512
 ```
 
-### Step 4: Run the Supervised Dynamic Gating Baseline 
-For a fair comparison against the RL agents, we employ a supervised dynamic gate model using the exact same pre-trained Modality Embeddings + Train-Set Normalized proxies.
-```bash
-uv run python scripts/benchmark_3mod_supervised_dynamic_gate.py --architecture attention
-```
-
-### Step 5: Build the Normalized RL Episodes
+### Step 4: Build the Normalized RL Episodes
 This script performs a 2-pass compilation for each fold: (1) calculating Population Mean/STD for the 14 training subjects, and (2) Z-scoring the structural noise proxies (SNR, Variance, RelVar) without leaking future data. Output episodes are saved as `.pt` tensors.
 ```bash
 # Build embeddings and normalized quality proxies (~2 mins)
 uv run python scripts/build_rl_episodes_3mod.py --out-root data/rl_episodes_3mod
 ```
+
+### Step 5: Run the Supervised Dynamic Gating Baseline 
+For a fair comparison against the RL agents, we employ a supervised dynamic gate model using the exact same pre-trained Modality Embeddings + Train-Set Normalized proxies.
+```bash
+uv run python scripts/benchmark_3mod_supervised_dynamic_gate.py --architecture attention
+```
+
 
 ### Step 6: Train the Multi-Agent RL Ecosystem
 Initialize the 3 agents, train them against the completed dataset utilizing the asymmetric (`-1.0, +1.0`) reward structure found in `configs/rl_3mod_f1.yaml`, and evaluate independently on the exact same 15-target test layout.
