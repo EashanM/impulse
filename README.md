@@ -110,7 +110,7 @@ uv run python scripts/benchmark_gru_cardiomind.py --epochs 20
 To reproduce the state-of-the-art results from scratch, follow these four steps.
 
 ### Step 1: Extract Physiological Features from Raw Data
-Convert the gigabytes of raw 700Hz/64Hz waveforms into structured feature arrays per subject.
+Convert the raw 700Hz/64Hz waveforms into structured feature arrays per subject.
 ```bash
 # 1. Extract ECG Heart Rate Variability features (CardioMind)
 uv run python scripts/preprocess.py --config configs/cardiomind_strict_ratio.yaml
