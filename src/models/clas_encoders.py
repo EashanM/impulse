@@ -1,4 +1,4 @@
-"""Encoder heads for CLAS windows: linear projection and 1D CNN+GRU."""
+"""Encoder heads for CLAS windows: linear, GRU on raw time steps, and 1D CNN+GRU."""
 
 from __future__ import annotations
 
@@ -25,6 +25,50 @@ class CLASLinearEncoder(nn.Module):
             raise ValueError(f"Expected C={self.in_channels}, L={self.seq_len}, got {c}, {l}")
         flat = x.reshape(b, c * l)
         return self.proj(flat)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encode(x)
+
+
+class CLASGruEncoder(nn.Module):
+    """GRU directly on (B, L, C) from raw windows; embedding is final-layer last hidden state."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        seq_len: int,
+        hidden_size: int = 64,
+        num_layers: int = 1,
+        dropout: float = 0.25,
+    ) -> None:
+        super().__init__()
+        self.in_channels = in_channels
+        self.seq_len = seq_len
+        gru_dropout = dropout if num_layers > 1 else 0.0
+        self.gru = nn.GRU(
+            input_size=in_channels,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=gru_dropout,
+        )
+        self.dropout = nn.Dropout(dropout)
+        self._emb_dim = hidden_size
+
+    @property
+    def embedding_dim(self) -> int:
+        return self._emb_dim
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 3:
+            raise ValueError(f"Expected (B,C,L), got {tuple(x.shape)}")
+        b, c, l = x.shape
+        if c != self.in_channels or l != self.seq_len:
+            raise ValueError(f"Expected C={self.in_channels}, L={self.seq_len}, got {c}, {l}")
+        x_seq = x.transpose(1, 2)  # (B, L, C)
+        _out, h_n = self.gru(x_seq)
+        last = h_n[-1]  # (B, hidden)
+        return self.dropout(last)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.encode(x)

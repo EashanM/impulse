@@ -10,6 +10,8 @@ Output: data/rl_episodes_3mod/fold_S{held_out}/S{sid}.pt
 
 from __future__ import annotations
 
+import _repo_root  # noqa: F401
+
 import argparse
 from pathlib import Path
 

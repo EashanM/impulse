@@ -9,6 +9,8 @@ Supports LOSO evaluation: trains on all folds except held-out, evaluates on held
 
 from __future__ import annotations
 
+import _repo_root  # noqa: F401
+
 import argparse
 import csv
 import time

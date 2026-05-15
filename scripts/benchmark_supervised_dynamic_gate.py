@@ -13,6 +13,8 @@ Requires aligned EDA windows to ECG timeline.
 
 from __future__ import annotations
 
+import _repo_root  # noqa: F401
+
 import argparse
 import csv
 import itertools

@@ -39,4 +39,4 @@ checkpoints/
 events.out.tfevents*
 
 #Data
-data/
+/data/

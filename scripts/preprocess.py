@@ -9,10 +9,9 @@ Usage:
 """
 
 import argparse
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _repo_root  # noqa: F401
 
 from src.config import load_config
 from src.data.preprocessor import process_and_save_all
