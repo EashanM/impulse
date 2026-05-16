@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
@@ -14,6 +15,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.data.clas_dataset import collect_windows_for_participant, discover_participant_ids
+from src.data.clas_feature_extract import load_preprocessed_participants
 from src.models.clas_encoders import (
     CLASCnnGruEncoder,
     CLASGruEncoder,
@@ -39,6 +41,26 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def impute_feature_tensor(
+    X: np.ndarray,
+    fill: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fill NaNs in (N, C, L). Returns imputed X and per-channel fill values."""
+    out = np.asarray(X, dtype=np.float32).copy()
+    n, c, l = out.shape
+    flat = out.transpose(0, 2, 1).reshape(-1, c)
+    if fill is None:
+        col_fill = np.nanmean(flat, axis=0)
+    else:
+        col_fill = np.asarray(fill, dtype=np.float32)
+    col_fill = np.where(np.isfinite(col_fill), col_fill, 0.0).astype(np.float32)
+    for j in range(c):
+        bad = ~np.isfinite(flat[:, j])
+        flat[bad, j] = col_fill[j]
+    out[:] = flat.reshape(n, l, c).transpose(0, 2, 1)
+    return out, col_fill
+
+
 def normalize_channels(X: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> np.ndarray:
     return ((X - mu.reshape(1, -1, 1)) / sigma.reshape(1, -1, 1)).astype(np.float32)
 
@@ -50,6 +72,48 @@ def channel_stats(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     sigma = flat.std(axis=0)
     sigma = np.where(sigma < 1e-6, 1.0, sigma)
     return mu.astype(np.float32), sigma.astype(np.float32)
+
+
+RAW_MODALITY_CHANNELS: dict[str, int] = {
+    "ecg2": 2,
+    "ppg": 1,
+    "gsr": 1,
+    "accel3": 3,
+}
+
+FEATURE_MODALITY_KEYS: frozenset[str] = frozenset({"ecg", "eda", "ppg"})
+
+# CNN+GRU uses two pool_size=4 layers; short EDA vectors (5) need padding.
+MIN_FEATURE_SEQ_LEN = 32
+
+
+def resolve_in_channels(modality: str, sample_x: np.ndarray | None = None) -> int:
+    if modality in RAW_MODALITY_CHANNELS:
+        return RAW_MODALITY_CHANNELS[modality]
+    if modality in FEATURE_MODALITY_KEYS:
+        return 1
+    if sample_x is not None and sample_x.ndim == 3:
+        return int(sample_x.shape[1])
+    raise ValueError(f"Cannot resolve in_channels for modality {modality!r}")
+
+
+def pad_feature_seq(X: np.ndarray, min_len: int = MIN_FEATURE_SEQ_LEN) -> np.ndarray:
+    """Pad (N, C, L) along L with zeros so CNN+GRU pools do not collapse."""
+    if X.shape[2] >= min_len:
+        return X
+    n, c, l = X.shape
+    pad = np.zeros((n, c, min_len - l), dtype=np.float32)
+    return np.concatenate([X, pad], axis=2)
+
+
+def resolve_seq_len(
+    modality: str,
+    target_len: int,
+    sample_x: np.ndarray | None,
+) -> int:
+    if modality in FEATURE_MODALITY_KEYS and sample_x is not None and sample_x.ndim == 3:
+        return int(sample_x.shape[2])
+    return target_len
 
 
 def load_all_participants(
@@ -147,6 +211,8 @@ def run_loso_encoder_lr(
     max_subjects: int | None,
     scheme: str = "high_vs_low",
     data: dict[int, tuple[np.ndarray, np.ndarray]] | None = None,
+    show_progress: bool = False,
+    progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
     """
     Leave-one-subject-out: per fold train encoder, LR on train embeddings, test on held subject.
@@ -174,10 +240,22 @@ def run_loso_encoder_lr(
     if len(subjects) < 2:
         return []
 
-    in_channels = {"ecg2": 2, "ppg": 1, "gsr": 1, "accel3": 3}[modality]
+    sample_x = data[subjects[0]][0]
+    if modality in FEATURE_MODALITY_KEYS:
+        data = {pid: (pad_feature_seq(X), y) for pid, (X, y) in data.items()}
+        sample_x = data[subjects[0]][0]
+    in_channels = resolve_in_channels(modality, sample_x)
+    seq_len = resolve_seq_len(modality, target_len, sample_x)
     fold_rows: list[dict[str, object]] = []
 
-    for held in subjects:
+    fold_desc = progress_desc or f"LOSO {modality}/{encoder}"
+    fold_iter: list[int] | tqdm = (
+        tqdm(subjects, desc=fold_desc, unit="fold", leave=False)
+        if show_progress
+        else subjects
+    )
+
+    for held in fold_iter:
         train_pids = [p for p in subjects if p != held]
         X_tr_list = [data[p][0] for p in train_pids]
         y_tr_list = [data[p][1] for p in train_pids]
@@ -188,16 +266,18 @@ def run_loso_encoder_lr(
         if np.unique(y_tr).size < 2 or np.unique(y_te).size < 2:
             continue
 
-        mu, sig = channel_stats(X_tr)
-        X_trn = normalize_channels(X_tr, mu, sig)
-        X_ten = normalize_channels(X_te, mu, sig)
+        X_tr_imp, fill = impute_feature_tensor(X_tr)
+        X_te_imp, _ = impute_feature_tensor(X_te, fill)
+        mu, sig = channel_stats(X_tr_imp)
+        X_trn = normalize_channels(X_tr_imp, mu, sig)
+        X_ten = normalize_channels(X_te_imp, mu, sig)
 
         X_enc, X_val, y_enc, y_val = train_test_split(
             X_trn, y_tr, test_size=0.15, random_state=seed + 1, stratify=y_tr
         )
 
         enc, emb_dim = build_encoder(
-            encoder, in_channels, target_len, embedding_dim, gru_hidden, dropout, device
+            encoder, in_channels, seq_len, embedding_dim, gru_hidden, dropout, device
         )
         model = EncoderWithHead(enc, emb_dim, num_classes=2).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -225,7 +305,16 @@ def run_loso_encoder_lr(
 
         best_state = None
         best_val = float("inf")
-        for _ in range(epochs):
+        epoch_iter = range(epochs)
+        if show_progress and epochs > 1:
+            epoch_iter = tqdm(
+                epoch_iter,
+                desc=f"  train Part{held}",
+                unit="epoch",
+                leave=False,
+                position=2,
+            )
+        for _ in epoch_iter:
             model.train()
             for xb, yb in tr_loader:
                 xb = xb.to(device)
@@ -270,6 +359,8 @@ def run_loso_encoder_lr(
         )
         Z_tr = encode_numpy(model.encoder, full_loader, device)
         Z_te = encode_numpy(model.encoder, test_loader, device)
+        Z_tr = np.nan_to_num(Z_tr, nan=0.0, posinf=0.0, neginf=0.0)
+        Z_te = np.nan_to_num(Z_te, nan=0.0, posinf=0.0, neginf=0.0)
         if scale_z:
             scaler = StandardScaler()
             Z_tr_f = scaler.fit_transform(Z_tr)
@@ -288,13 +379,15 @@ def run_loso_encoder_lr(
         f1_per = f1_score(y_te, pred, labels=[0, 1], average=None, zero_division=0)
         f1_c0, f1_c1 = float(f1_per[0]), float(f1_per[1])
 
+        acc = float(accuracy_score(y_te, pred))
+        macro_f1 = float(f1_score(y_te, pred, average="macro"))
         fold_rows.append(
             {
                 "held_out": held,
                 "n_train_windows": int(X_tr.shape[0]),
                 "n_test_windows": int(X_te.shape[0]),
-                "acc": float(accuracy_score(y_te, pred)),
-                "macro_f1": float(f1_score(y_te, pred, average="macro")),
+                "acc": acc,
+                "macro_f1": macro_f1,
                 "f1_class_0": f1_c0,
                 "f1_class_1": f1_c1,
                 "precision_macro": float(
@@ -303,5 +396,7 @@ def run_loso_encoder_lr(
                 "recall_macro": float(recall_score(y_te, pred, average="macro", zero_division=0)),
             }
         )
+        if show_progress and isinstance(fold_iter, tqdm):
+            fold_iter.set_postfix(held=f"Part{held}", acc=f"{acc:.3f}", f1=f"{macro_f1:.3f}")
 
     return fold_rows
