@@ -13,7 +13,8 @@ ECG defaults: 20 s window, 5 s stride.
 
 Other examples:
   uv run python scripts/clas_preprocess_and_benchmark.py --skip-preprocess
-  uv run python scripts/clas_preprocess_and_benchmark.py --max-subjects 5 --device cpu
+  uv run python scripts/clas_preprocess_and_benchmark.py --modalities ecg --encoders gru
+  uv run python scripts/clas_preprocess_and_benchmark.py --modalities ecg eda --encoders linear cnn_gru
 """
 
 from __future__ import annotations
@@ -49,9 +50,6 @@ STREAM_NAMES = {
     "ppg": "PPG",
 }
 
-ENCODERS = ["linear", "gru", "cnn_gru"]
-
-
 def _banner(title: str) -> None:
     line = "=" * 72
     print(f"\n{line}\n{title}\n{line}", flush=True)
@@ -70,6 +68,28 @@ def _emit(msg: str, *, show_progress: bool) -> None:
 
 def _md_escape_cell(s: str) -> str:
     return s.replace("|", "\\|").replace("\n", " ")
+
+
+def print_metrics_table(
+    summary_rows: list[dict[str, object]],
+    *,
+    title: str = "Metrics (macro over LOSO folds)",
+) -> None:
+    """Print accuracy, precision, recall, F1 for each modality/model row."""
+    print(f"\n{title}", flush=True)
+    hdr = (
+        f"{'modality':<8} {'encoder':<10} {'n_folds':>7} "
+        f"{'accuracy':>10} {'precision':>10} {'recall':>10} {'f1_macro':>10}"
+    )
+    print(hdr, flush=True)
+    print("-" * len(hdr), flush=True)
+    for row in summary_rows:
+        print(
+            f"{row['data_stream']!s:<8} {row['model']!s:<10} {int(row['n_folds']):>7} "
+            f"{float(row['accuracy_mean']):>10.4f} {float(row['precision_macro_mean']):>10.4f} "
+            f"{float(row['recall_macro_mean']):>10.4f} {float(row['f1_macro_mean']):>10.4f}",
+            flush=True,
+        )
 
 
 def write_summary_table(
@@ -142,22 +162,13 @@ def write_summary_table(
     _emit(f"  Summary CSV:  {summary_csv}", show_progress=show_progress)
     _emit(f"  Summary MD:   {md_path}", show_progress=show_progress)
 
-    print("\nResults preview:", flush=True)
-    print(f"{'stream':<6} {'model':<10} {'acc':>8} {'f1_macro':>10}", flush=True)
-    print("-" * 38, flush=True)
-    for row in summary_rows:
-        print(
-            f"{row['data_stream']!s:<6} {row['model']!s:<10} "
-            f"{row['accuracy_mean']!s:>8.4f} {row['f1_macro_mean']!s:>10.4f}",
-            flush=True,
-        )
-
 
 def run_benchmark(
     *,
     processed_root: Path,
     out_dir: Path,
     modalities: list[str],
+    encoders: list[str],
     epochs: int,
     batch_size: int,
     embedding_dim: int,
@@ -172,11 +183,12 @@ def run_benchmark(
     show_progress: bool,
     write_fold_rows: bool,
     target_len_placeholder: int,
+    clas_root: Path,
 ) -> list[dict[str, object]]:
     summary_rows: list[dict[str, object]] = []
     fold_all: list[dict[str, object]] = []
 
-    total_runs = len(modalities) * len(ENCODERS)
+    total_runs = len(modalities) * len(encoders)
     run_bar = (
         tqdm(total=total_runs, desc="Step 2 · benchmark runs", unit="run", position=0, leave=True)
         if show_progress
@@ -203,12 +215,12 @@ def run_benchmark(
         if len(subjects) < 2:
             _emit(f"  Skip {modality}: need >=2 participants.", show_progress=show_progress)
             if run_bar is not None:
-                run_bar.update(len(ENCODERS))
+                run_bar.update(len(encoders))
             continue
 
         n_feat = int(data[subjects[0]][0].shape[2])
 
-        for ei, encoder in enumerate(ENCODERS):
+        for ei, encoder in enumerate(encoders):
             run_seed = seed + mi * 100 + ei
             seed_all(run_seed)
             if run_bar is not None:
@@ -216,13 +228,13 @@ def run_benchmark(
             else:
                 print(
                     f"  [{STREAM_NAMES[modality]}] encoder={encoder} "
-                    f"({ei + 1}/{len(ENCODERS)})",
+                    f"({ei + 1}/{len(encoders)})",
                     flush=True,
                 )
 
             t0 = time.perf_counter()
             fold_rows = run_loso_encoder_lr(
-                clas_root=DEFAULT_CLAS_ROOT,
+                clas_root=clas_root,
                 modality=modality,
                 encoder=encoder,
                 window_sec=0.0,
@@ -263,6 +275,8 @@ def run_benchmark(
             recalls = [float(r["recall_macro"]) for r in fold_rows]
             mean_acc = float(np.mean(accs))
             mean_f1 = float(np.mean(f1s))
+            mean_prec = float(np.mean(precs))
+            mean_rec = float(np.mean(recalls))
 
             summary_rows.append(
                 {
@@ -272,13 +286,14 @@ def run_benchmark(
                     "n_folds": len(fold_rows),
                     "accuracy_mean": mean_acc,
                     "f1_macro_mean": mean_f1,
-                    "precision_macro_mean": float(np.mean(precs)),
-                    "recall_macro_mean": float(np.mean(recalls)),
+                    "precision_macro_mean": mean_prec,
+                    "recall_macro_mean": mean_rec,
                 }
             )
             _emit(
                 f"    {STREAM_NAMES[modality]}/{encoder}: "
-                f"acc={mean_acc:.4f} f1={mean_f1:.4f} ({len(fold_rows)} folds, {elapsed:.1f}s)",
+                f"acc={mean_acc:.4f} prec={mean_prec:.4f} rec={mean_rec:.4f} "
+                f"f1={mean_f1:.4f} ({len(fold_rows)} folds, {elapsed:.1f}s)",
                 show_progress=show_progress,
             )
 
@@ -324,6 +339,22 @@ def main() -> None:
         action="store_true",
         help="Skip Step 1; use existing files under --processed-root",
     )
+    parser.add_argument(
+        "--modalities",
+        nargs="+",
+        choices=["ecg", "eda", "ppg"],
+        default=["ecg", "eda", "ppg"],
+        metavar="MOD",
+        help="Which modalities to extract (Step 1) and benchmark (Step 2)",
+    )
+    parser.add_argument(
+        "--encoders",
+        nargs="+",
+        choices=["linear", "gru", "cnn_gru"],
+        default=["linear", "gru", "cnn_gru"],
+        metavar="ENC",
+        help="Which encoder(s) to run (subset of linear, gru, cnn_gru)",
+    )
     parser.add_argument("--ecg-window-sec", type=int, default=20)
     parser.add_argument("--ecg-stride-sec", type=int, default=5)
     parser.add_argument("--eda-window-sec", type=int, default=20)
@@ -355,7 +386,8 @@ def main() -> None:
     show_progress = not args.no_progress
     seed_all(args.seed)
     device = resolve_device(args.device)
-    modalities = ["ecg", "eda", "ppg"]
+    modalities = list(dict.fromkeys(args.modalities))
+    encoders = list(dict.fromkeys(args.encoders))
 
     n_participants = len(discover_participant_ids(args.clas_root))
     if args.max_subjects is not None:
@@ -369,6 +401,8 @@ def main() -> None:
     print(f"  CLAS root:       {args.clas_root}", flush=True)
     print(f"  Processed data:  {args.processed_root}", flush=True)
     print(f"  Results:         {args.out_dir}", flush=True)
+    print(f"  Modalities:      {', '.join(modalities)}", flush=True)
+    print(f"  Encoders:        {', '.join(encoders)}", flush=True)
     print(
         f"  Windows (sec):   ECG {args.ecg_window_sec}/{args.ecg_stride_sec}  "
         f"EDA {args.eda_window_sec}/{args.eda_stride_sec}  "
@@ -377,7 +411,7 @@ def main() -> None:
     )
 
     if not args.skip_preprocess:
-        _banner("Step 1/3 — Feature extraction (ECG + EDA + PPG)")
+        _banner(f"Step 1/3 — Feature extraction ({', '.join(m.upper() for m in modalities)})")
         t0 = time.perf_counter()
         run_extract(
             clas_root=args.clas_root,
@@ -415,6 +449,7 @@ def main() -> None:
             },
             "ecg_channel": args.ecg_channel,
             "modalities": modalities,
+            "encoders_run": encoders,
         }
         args.processed_root.mkdir(parents=True, exist_ok=True)
         manifest_path = args.processed_root / "manifest.json"
@@ -436,10 +471,10 @@ def main() -> None:
             )
         print(f"  Found {n_files} files in {sub}", flush=True)
 
-    _banner("Step 2/3 — LOSO encoder benchmark (linear, GRU, CNN+GRU)")
+    _banner(f"Step 2/3 — LOSO benchmark ({', '.join(encoders)})")
     print(
-        f"  {len(modalities)} modalities × {len(ENCODERS)} encoders = "
-        f"{len(modalities) * len(ENCODERS)} runs",
+        f"  {len(modalities)} modalities × {len(encoders)} encoders = "
+        f"{len(modalities) * len(encoders)} runs",
         flush=True,
     )
     t1 = time.perf_counter()
@@ -447,6 +482,7 @@ def main() -> None:
         processed_root=args.processed_root,
         out_dir=args.out_dir,
         modalities=modalities,
+        encoders=encoders,
         epochs=args.epochs,
         batch_size=args.batch_size,
         embedding_dim=args.embedding_dim,
@@ -461,11 +497,15 @@ def main() -> None:
         show_progress=show_progress,
         write_fold_rows=args.write_fold_rows,
         target_len_placeholder=50,
+        clas_root=args.clas_root,
     )
     print(f"\n[Step 2/3] Done in {time.perf_counter() - t1:.1f}s.", flush=True)
 
     if not summary:
         raise SystemExit("No benchmark rows produced.")
+
+    _banner("FINAL — LOSO metrics (macro precision / recall / F1)")
+    print_metrics_table(summary, title="Mean test metrics per modality × encoder")
 
     _banner("All steps complete")
     print(f"  Preprocessed features: {args.processed_root}", flush=True)
