@@ -219,6 +219,10 @@ def run_loso_encoder_lr(
     max_subjects: int | None,
     scheme: str = "high_vs_low",
     data: dict[int, tuple[np.ndarray, np.ndarray]] | None = None,
+    processed_root: Path | None = None,
+    nk_sub_win_sec: float = 2.0,
+    nk_sub_stride_sec: float = 2.0,
+    require_cache: bool = False,
     show_progress: bool = False,
     progress_desc: str | None = None,
 ) -> list[dict[str, object]]:
