@@ -101,6 +101,24 @@ def main() -> None:
         action="store_true",
         help="Use raw ppg/gsr instead of NeuroKit ppg_nk/eda_nk",
     )
+    parser.add_argument(
+        "--modalities",
+        nargs="+",
+        default=None,
+        metavar="MOD",
+        help=(
+            "Modalities to run. Options: ecg2, ppg_nk, eda_nk, ppg, gsr. "
+            "Defaults to: ecg2+ppg_nk+eda_nk (or ecg2+ppg+gsr with --use-raw-ppg-eda)."
+        ),
+    )
+    parser.add_argument(
+        "--encoders",
+        nargs="+",
+        choices=["linear", "gru", "cnn_gru"],
+        default=None,
+        metavar="ENC",
+        help="Encoders to run (subset of linear, gru, cnn_gru). Default: all three.",
+    )
     parser.add_argument("--embedding-dim", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -136,12 +154,28 @@ def main() -> None:
 
     nk_target_len = args.nk_target_len if args.nk_target_len is not None else nk_default_target_len()
     if args.use_raw_ppg_eda:
-        modalities = ["ecg2", "ppg", "gsr"]
+        default_modalities = ["ecg2", "ppg", "gsr"]
         processed_root = None
     else:
-        modalities = ["ecg2", "ppg_nk", "eda_nk"]
+        default_modalities = ["ecg2", "ppg_nk", "eda_nk"]
         processed_root = args.processed_root
-    encoders = ["linear", "gru", "cnn_gru"]
+
+    # Allow subsetting runs from CLI.
+    valid_modalities = {"ecg2", "ppg_nk", "eda_nk", "ppg", "gsr"}
+    if args.modalities is None:
+        modalities = default_modalities
+    else:
+        modalities = [m.strip() for m in args.modalities]
+        unknown = sorted(set(modalities) - valid_modalities)
+        if unknown:
+            raise SystemExit(f"Unknown modalities: {unknown}. Valid: {sorted(valid_modalities)}")
+    # Keep order, drop duplicates.
+    modalities = list(dict.fromkeys(modalities))
+
+    if args.encoders is None:
+        encoders = ["linear", "gru", "cnn_gru"]
+    else:
+        encoders = list(dict.fromkeys(args.encoders))
 
     summary_rows: list[dict[str, object]] = []
     fold_all: list[dict[str, object]] = []
