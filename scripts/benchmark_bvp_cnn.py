@@ -15,6 +15,8 @@ held-out subject, and writes a CSV with per-subject and aggregate metrics.
 
 from __future__ import annotations
 
+import _repo_root  # noqa: F401
+
 import argparse
 import csv
 from pathlib import Path

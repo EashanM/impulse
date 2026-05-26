@@ -22,6 +22,8 @@ Requires:
 
 from __future__ import annotations
 
+import _repo_root  # noqa: F401
+
 import argparse
 import csv
 from pathlib import Path

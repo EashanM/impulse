@@ -37,3 +37,6 @@ checkpoints/
 
 # TensorBoard
 events.out.tfevents*
+
+#Data
+/data/

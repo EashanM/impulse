@@ -16,11 +16,11 @@ import argparse
 import sys
 from pathlib import Path
 
+import _repo_root  # noqa: F401
+
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, precision_score, recall_score
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_config
 from src.data.preprocessor import get_subject_ids_from_config, load_all_processed
