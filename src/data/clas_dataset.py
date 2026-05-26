@@ -291,7 +291,7 @@ def extract_windows_from_block(
 
 
 def modality_tensor(block: BlockRow, modality: str) -> np.ndarray:
-    """Load (T, C) for modality: ecg2 | ppg | gsr | accel3."""
+    """Load (T, C) for modality: ecg2 | ppg | gsr | accel3 | ppg_nk | eda_nk (1d in col 0)."""
     if modality == "ecg2":
         return load_ecg_matrix(block.ecg_path)
     g = load_gsr_ppg_matrix(block.gsr_ppg_path)
@@ -300,9 +300,17 @@ def modality_tensor(block: BlockRow, modality: str) -> np.ndarray:
         return g[:, 3:4]
     if modality == "gsr":
         return g[:, 4:5]
+    if modality == "ppg_nk":
+        return g[:, 3:4]
+    if modality == "eda_nk":
+        return g[:, 4:5]
     if modality == "accel3":
         return g[:, 0:3]
     raise ValueError(f"Unknown modality {modality!r}")
+
+
+def _nk_cache_path(processed_root: Path, participant_id: int, modality: str) -> Path:
+    return processed_root / f"Part{participant_id}_{modality}.npz"
 
 
 def collect_windows_for_participant(
@@ -315,8 +323,24 @@ def collect_windows_for_participant(
     scheme: str = "high_vs_low",
     min_quality: float | None = None,
     quality_modality: str = "ecg",
+    processed_root: Path | None = None,
+    nk_sub_win_sec: float = 2.0,
+    nk_sub_stride_sec: float = 2.0,
+    require_cache: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return X (N, C, L), y (N,) for all labeled blocks of one participant."""
+    from src.data.clas_nk_features import NK_MODALITIES, extract_nk_windows_from_block
+
+    if processed_root is not None and modality in NK_MODALITIES:
+        cache = _nk_cache_path(processed_root, participant_id, modality)
+        if cache.is_file():
+            data = np.load(cache)
+            return data["X"].astype(np.float32), data["y"].astype(np.int64)
+        if require_cache:
+            raise FileNotFoundError(
+                f"Missing NK cache {cache}. Run scripts/preprocess_clas_nk.py first."
+            )
+
     xs: list[np.ndarray] = []
     ys: list[int] = []
     for blk in iter_labeled_blocks(
@@ -327,13 +351,33 @@ def collect_windows_for_participant(
         quality_modality=quality_modality,
     ):
         sig = modality_tensor(blk, modality)
-        w = extract_windows_from_block(sig, blk.length_sec, window_sec, stride_sec, target_len)
+        if modality in NK_MODALITIES:
+            w = extract_nk_windows_from_block(
+                sig[:, 0],
+                blk.length_sec,
+                window_sec,
+                stride_sec,
+                target_len,
+                nk_sub_win_sec,
+                nk_sub_stride_sec,
+                kind=modality,  # type: ignore[arg-type]
+            )
+        else:
+            w = extract_windows_from_block(sig, blk.length_sec, window_sec, stride_sec, target_len)
         if w.shape[0] == 0:
             continue
         xs.append(w)
         ys.extend([blk.y] * w.shape[0])
     if not xs:
-        return np.zeros((0, 1, target_len), np.float32), np.zeros((0,), np.int64)
+        c = 1
+        if modality in NK_MODALITIES:
+            from src.data.clas_nk_features import nk_channel_count, nk_default_target_len
+
+            c = nk_channel_count(modality)
+            tl = max(target_len, nk_default_target_len())
+        else:
+            tl = target_len
+        return np.zeros((0, c, tl), np.float32), np.zeros((0,), np.int64)
     X = np.concatenate(xs, axis=0)
     y = np.asarray(ys, dtype=np.int64)
     return X, y

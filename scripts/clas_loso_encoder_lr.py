@@ -27,7 +27,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CLAS LOSO encoder + logistic regression")
     parser.add_argument("--clas-root", type=Path, default=DEFAULT_CLAS_ROOT)
     parser.add_argument("--encoder", choices=["linear", "gru", "cnn_gru"], default="linear")
-    parser.add_argument("--modality", choices=["ecg2", "ppg", "gsr", "accel3"], default="ppg")
+    parser.add_argument(
+        "--modality",
+        choices=["ecg2", "ppg", "gsr", "ppg_nk", "eda_nk", "accel3"],
+        default="ppg",
+    )
+    parser.add_argument("--processed-root", type=Path, default=None)
+    parser.add_argument("--nk-target-len", type=int, default=32)
     parser.add_argument("--window-sec", type=float, default=8.0)
     parser.add_argument("--stride-sec", type=float, default=8.0)
     parser.add_argument("--target-len", type=int, default=1024, help="Resampled length per window")
@@ -49,6 +55,9 @@ def main() -> None:
 
     seed_all(args.seed)
     device = resolve_device(args.device)
+    target_len = args.target_len
+    if args.modality in ("ppg_nk", "eda_nk"):
+        target_len = args.nk_target_len
 
     fold_rows = run_loso_encoder_lr(
         clas_root=args.clas_root,
@@ -56,7 +65,7 @@ def main() -> None:
         encoder=args.encoder,
         window_sec=args.window_sec,
         stride_sec=args.stride_sec,
-        target_len=args.target_len,
+        target_len=target_len,
         embedding_dim=args.embedding_dim,
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -72,6 +81,7 @@ def main() -> None:
         max_subjects=args.max_subjects,
         scheme="high_vs_low",
         data=None,
+        processed_root=args.processed_root,
     )
 
     if not fold_rows:

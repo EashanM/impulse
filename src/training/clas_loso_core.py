@@ -52,6 +52,21 @@ def channel_stats(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return mu.astype(np.float32), sigma.astype(np.float32)
 
 
+def resolve_encoder_dims(
+    modality: str,
+    data: dict[int, tuple[np.ndarray, np.ndarray]],
+    target_len: int,
+) -> tuple[int, int]:
+    """Return (in_channels, seq_len) for encoders from loaded arrays or raw defaults."""
+    if data:
+        X0 = next(iter(data.values()))[0]
+        return int(X0.shape[1]), int(X0.shape[2])
+    raw_channels = {"ecg2": 2, "ppg": 1, "gsr": 1, "accel3": 3}
+    if modality in raw_channels:
+        return raw_channels[modality], target_len
+    raise ValueError(f"Cannot infer dims for modality {modality!r} with no data")
+
+
 def load_all_participants(
     clas_root: Path,
     pids: list[int],
@@ -62,6 +77,10 @@ def load_all_participants(
     scheme: str,
     min_quality: float | None,
     quality_modality: str,
+    processed_root: Path | None = None,
+    nk_sub_win_sec: float = 2.0,
+    nk_sub_stride_sec: float = 2.0,
+    require_cache: bool = False,
 ) -> dict[int, tuple[np.ndarray, np.ndarray]]:
     out: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     for pid in pids:
@@ -75,6 +94,10 @@ def load_all_participants(
             scheme=scheme,
             min_quality=min_quality,
             quality_modality=quality_modality,
+            processed_root=processed_root,
+            nk_sub_win_sec=nk_sub_win_sec,
+            nk_sub_stride_sec=nk_sub_stride_sec,
+            require_cache=require_cache,
         )
         if X.shape[0] > 0:
             out[pid] = (X, y)
@@ -147,6 +170,10 @@ def run_loso_encoder_lr(
     max_subjects: int | None,
     scheme: str = "high_vs_low",
     data: dict[int, tuple[np.ndarray, np.ndarray]] | None = None,
+    processed_root: Path | None = None,
+    nk_sub_win_sec: float = 2.0,
+    nk_sub_stride_sec: float = 2.0,
+    require_cache: bool = False,
 ) -> list[dict[str, object]]:
     """
     Leave-one-subject-out: per fold train encoder, LR on train embeddings, test on held subject.
@@ -168,13 +195,17 @@ def run_loso_encoder_lr(
             scheme,
             min_quality,
             quality_modality,
+            processed_root=processed_root,
+            nk_sub_win_sec=nk_sub_win_sec,
+            nk_sub_stride_sec=nk_sub_stride_sec,
+            require_cache=require_cache,
         )
 
     subjects = sorted(data.keys())
     if len(subjects) < 2:
         return []
 
-    in_channels = {"ecg2": 2, "ppg": 1, "gsr": 1, "accel3": 3}[modality]
+    in_channels, seq_len = resolve_encoder_dims(modality, data, target_len)
     fold_rows: list[dict[str, object]] = []
 
     for held in subjects:
@@ -197,7 +228,7 @@ def run_loso_encoder_lr(
         )
 
         enc, emb_dim = build_encoder(
-            encoder, in_channels, target_len, embedding_dim, gru_hidden, dropout, device
+            encoder, in_channels, seq_len, embedding_dim, gru_hidden, dropout, device
         )
         model = EncoderWithHead(enc, emb_dim, num_classes=2).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)

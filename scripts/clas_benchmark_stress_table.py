@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """CLAS stress proxy (high vs low load): LOSO grid over ECG, PPG, EDA × linear, GRU, CNN+GRU.
 
-Writes mean accuracy, macro F1, macro precision, macro recall (averaged over LOSO folds) to
-CSV and Markdown under ``--out-dir``.
+PPG and EDA use NeuroKit2 feature maps (``ppg_nk``, ``eda_nk``) from preprocessed caches.
+ECG uses raw resampled waveforms (``ecg2``).
 
-Label scheme: high cognitive/affective load = stress (1); baseline/neutral = not stress (0).
-See ``src.data.clas_dataset`` HIGH_LOAD_BLOCK_TYPES / LOW_LOAD_BLOCK_TYPES.
+Preprocess NK features first:
+  uv run python scripts/preprocess_clas_nk.py --out-root data/processed_clas_nk
 
-Example:
-  uv run python scripts/clas_benchmark_stress_table.py --out-dir runs/clas_stress_benchmark \\
-      --epochs 25 --device cpu
+Example benchmark:
+  uv run python scripts/clas_benchmark_stress_table.py \\
+      --processed-root data/processed_clas_nk --require-cache --epochs 25
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import numpy as np
 from tqdm import tqdm
 
 from src.data.clas_dataset import DEFAULT_CLAS_ROOT, discover_participant_ids
+from src.data.clas_nk_features import nk_default_target_len
 from src.training.clas_loso_core import (
     load_all_participants,
     resolve_device,
@@ -37,7 +38,23 @@ STREAM_NAMES = {
     "ecg2": "ECG",
     "ppg": "PPG",
     "gsr": "EDA",
+    "ppg_nk": "PPG",
+    "eda_nk": "EDA",
 }
+
+
+def _quality_modality_for(modality: str, default: str) -> str:
+    if modality == "ppg_nk":
+        return "ppg"
+    if modality in ("eda_nk", "gsr"):
+        return "eda"
+    return default
+
+
+def _target_len_for(modality: str, ecg_target_len: int, nk_target_len: int) -> int:
+    if modality in ("ppg_nk", "eda_nk"):
+        return nk_target_len
+    return ecg_target_len
 
 def _md_escape_cell(s: str) -> str:
     return s.replace("|", "\\|").replace("\n", " ")
@@ -49,7 +66,41 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, default=Path("runs/clas_stress_benchmark"))
     parser.add_argument("--window-sec", type=float, default=8.0)
     parser.add_argument("--stride-sec", type=float, default=8.0)
-    parser.add_argument("--target-len", type=int, default=1024)
+    parser.add_argument("--target-len", type=int, default=1024, help="Sequence length L for raw ECG")
+    parser.add_argument(
+        "--nk-target-len",
+        type=int,
+        default=None,
+        help=f"Sequence length L for NK PPG/EDA (default {nk_default_target_len()})",
+    )
+    parser.add_argument(
+        "--processed-root",
+        type=Path,
+        default=Path("data/processed_clas_nk"),
+        help="Directory with Part*_ppg_nk.npz / Part*_eda_nk.npz caches",
+    )
+    parser.add_argument(
+        "--require-cache",
+        action="store_true",
+        help="Require NK caches (do not compute NK features on the fly)",
+    )
+    parser.add_argument(
+        "--sub-win-sec",
+        type=float,
+        default=2.0,
+        help="Sub-window length inside each CLAS window for NK features",
+    )
+    parser.add_argument(
+        "--sub-stride-sec",
+        type=float,
+        default=2.0,
+        help="Sub-window stride for NK features (preprocess + on-the-fly)",
+    )
+    parser.add_argument(
+        "--use-raw-ppg-eda",
+        action="store_true",
+        help="Use raw ppg/gsr instead of NeuroKit ppg_nk/eda_nk",
+    )
     parser.add_argument("--embedding-dim", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=128)
@@ -83,23 +134,35 @@ def main() -> None:
     if args.max_subjects is not None:
         pids_all = pids_all[: args.max_subjects]
 
-    modalities = ["ecg2", "ppg", "gsr"]
+    nk_target_len = args.nk_target_len if args.nk_target_len is not None else nk_default_target_len()
+    if args.use_raw_ppg_eda:
+        modalities = ["ecg2", "ppg", "gsr"]
+        processed_root = None
+    else:
+        modalities = ["ecg2", "ppg_nk", "eda_nk"]
+        processed_root = args.processed_root
     encoders = ["linear", "gru", "cnn_gru"]
 
     summary_rows: list[dict[str, object]] = []
     fold_all: list[dict[str, object]] = []
 
     for mi, modality in enumerate(modalities):
+        mod_target_len = _target_len_for(modality, args.target_len, nk_target_len)
+        q_mod = _quality_modality_for(modality, args.quality_modality)
         data = load_all_participants(
             args.clas_root,
             pids_all,
             modality,
             args.window_sec,
             args.stride_sec,
-            args.target_len,
+            mod_target_len,
             "high_vs_low",
             args.min_quality,
-            args.quality_modality,
+            q_mod,
+            processed_root=processed_root,
+            nk_sub_win_sec=args.sub_win_sec,
+            nk_sub_stride_sec=args.sub_stride_sec,
+            require_cache=args.require_cache,
         )
         subjects = sorted(data.keys())
         print(
@@ -130,7 +193,7 @@ def main() -> None:
                 encoder=encoder,
                 window_sec=args.window_sec,
                 stride_sec=args.stride_sec,
-                target_len=args.target_len,
+                target_len=mod_target_len,
                 embedding_dim=args.embedding_dim,
                 epochs=args.epochs,
                 batch_size=args.batch_size,
@@ -141,11 +204,15 @@ def main() -> None:
                 seed=run_seed,
                 device=device,
                 min_quality=args.min_quality,
-                quality_modality=args.quality_modality,
+                quality_modality=q_mod,
                 scale_z=args.scale_z,
                 max_subjects=None,
                 scheme="high_vs_low",
                 data=data,
+                processed_root=processed_root,
+                nk_sub_win_sec=args.sub_win_sec,
+                nk_sub_stride_sec=args.sub_stride_sec,
+                require_cache=args.require_cache,
             )
             elapsed = time.perf_counter() - t0
             if not args.no_progress and isinstance(enc_iter, tqdm):
@@ -222,6 +289,7 @@ def main() -> None:
         "",
         "Metrics are **macro** precision/recall/F1 and **accuracy**, each **averaged over LOSO folds**.",
         "Stress = high cognitive/affective load blocks; not stress = baseline/neutral.",
+        "PPG/EDA rows use NeuroKit2 PRV + morphology / SCR feature maps unless --use-raw-ppg-eda.",
         "",
         "| data_stream | model | n_folds | accuracy | f1_macro | precision_macro | recall_macro |",
         "|-------------|-------|---------|----------|----------|-----------------|--------------|",
