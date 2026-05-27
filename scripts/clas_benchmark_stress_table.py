@@ -269,7 +269,7 @@ def main() -> None:
 
             summary_rows.append(
                 {
-                    "data_stream": STREAM_NAMES[modality],
+                    "data_stream": STREAM_NAMES.get(modality, modality),
                     "modality_key": modality,
                     "model": encoder,
                     "n_folds": len(fold_rows),
@@ -357,6 +357,17 @@ def main() -> None:
             for row in fold_all:
                 w.writerow(row)
 
+    print("\n=== Results ===")
+    for row in summary_rows:
+        print(
+            f"  {row['data_stream']} / {row['model']}  "
+            f"Accuracy={row['accuracy_mean']:.4f}  "
+            f"Precision={row['precision_macro_mean']:.4f}  "
+            f"Recall={row['recall_macro_mean']:.4f}  "
+            f"F1={row['f1_macro_mean']:.4f}  "
+            f"({int(row['n_folds'])} folds)"
+        )
+    print()
     print(f"Wrote {summary_csv} and {md_path} ({len(summary_rows)} rows).")
 
 
