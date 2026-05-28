@@ -6,7 +6,7 @@ Run everything (recommended):
 
 Pipeline:
   Step 1/3 — Extract features -> data/processed_clas_features/{ecg,eda,ppg}/
-  Step 2/3 — LOSO: linear / GRU / CNN+GRU on feature tensors
+  Step 2/3 — LOSO: linear / GRU / LSTM / CNN+GRU / CNN+LSTM on feature tensors
   Step 3/3 — Write runs/clas_feature_benchmark/clas_stress_summary.csv (+ .md)
 
 ECG defaults: 20 s window, 5 s stride.
@@ -15,6 +15,7 @@ Other examples:
   uv run python scripts/clas_preprocess_and_benchmark.py --skip-preprocess
   uv run python scripts/clas_preprocess_and_benchmark.py --modalities ecg --encoders gru
   uv run python scripts/clas_preprocess_and_benchmark.py --modalities ecg eda --encoders linear cnn_gru
+  uv run python scripts/clas_preprocess_and_benchmark.py --skip-preprocess --encoders lstm cnn_lstm
 """
 
 from __future__ import annotations
@@ -350,10 +351,10 @@ def main() -> None:
     parser.add_argument(
         "--encoders",
         nargs="+",
-        choices=["linear", "gru", "cnn_gru"],
+        choices=["linear", "gru", "cnn_gru", "lstm", "cnn_lstm"],
         default=["linear", "gru", "cnn_gru"],
         metavar="ENC",
-        help="Which encoder(s) to run (subset of linear, gru, cnn_gru)",
+        help="Which encoder(s) to run (linear, gru, cnn_gru, lstm, cnn_lstm)",
     )
     parser.add_argument("--ecg-window-sec", type=int, default=20)
     parser.add_argument("--ecg-stride-sec", type=int, default=5)

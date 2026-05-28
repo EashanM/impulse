@@ -18,8 +18,10 @@ from src.data.clas_dataset import collect_windows_for_participant, discover_part
 from src.data.clas_feature_extract import load_preprocessed_participants
 from src.models.clas_encoders import (
     CLASCnnGruEncoder,
+    CLASCnnLstmEncoder,
     CLASGruEncoder,
     CLASLinearEncoder,
+    CLASLstmEncoder,
     EncoderWithHead,
 )
 
@@ -83,7 +85,7 @@ RAW_MODALITY_CHANNELS: dict[str, int] = {
 
 FEATURE_MODALITY_KEYS: frozenset[str] = frozenset({"ecg", "eda", "ppg"})
 
-# CNN+GRU uses two pool_size=4 layers; short EDA vectors (5) need padding.
+# CNN+GRU/LSTM use two pool_size=4 layers; short EDA vectors (5) need padding.
 MIN_FEATURE_SEQ_LEN = 32
 
 
@@ -98,7 +100,7 @@ def resolve_in_channels(modality: str, sample_x: np.ndarray | None = None) -> in
 
 
 def pad_feature_seq(X: np.ndarray, min_len: int = MIN_FEATURE_SEQ_LEN) -> np.ndarray:
-    """Pad (N, C, L) along L with zeros so CNN+GRU pools do not collapse."""
+    """Pad (N, C, L) along L with zeros so CNN+recurrent pools do not collapse."""
     if X.shape[2] >= min_len:
         return X
     n, c, l = X.shape
@@ -182,6 +184,23 @@ def build_encoder(
             in_channels=in_channels,
             seq_len=target_len,
             gru_hidden=gru_hidden,
+            dropout=dropout,
+        ).to(device)
+        return enc, enc.embedding_dim
+    if encoder_name == "lstm":
+        enc = CLASLstmEncoder(
+            in_channels=in_channels,
+            seq_len=target_len,
+            hidden_size=gru_hidden,
+            num_layers=1,
+            dropout=dropout,
+        ).to(device)
+        return enc, enc.embedding_dim
+    if encoder_name == "cnn_lstm":
+        enc = CLASCnnLstmEncoder(
+            in_channels=in_channels,
+            seq_len=target_len,
+            lstm_hidden=gru_hidden,
             dropout=dropout,
         ).to(device)
         return enc, enc.embedding_dim

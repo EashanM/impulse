@@ -26,7 +26,11 @@ from src.training.clas_loso_core import resolve_device, run_loso_encoder_lr, see
 def main() -> None:
     parser = argparse.ArgumentParser(description="CLAS LOSO encoder + logistic regression")
     parser.add_argument("--clas-root", type=Path, default=DEFAULT_CLAS_ROOT)
-    parser.add_argument("--encoder", choices=["linear", "gru", "cnn_gru"], default="linear")
+    parser.add_argument(
+        "--encoder",
+        choices=["linear", "gru", "cnn_gru", "lstm", "cnn_lstm"],
+        default="linear",
+    )
     parser.add_argument("--modality", choices=["ecg2", "ppg", "gsr", "accel3"], default="ppg")
     parser.add_argument("--window-sec", type=float, default=8.0)
     parser.add_argument("--stride-sec", type=float, default=8.0)
