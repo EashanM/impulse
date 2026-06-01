@@ -23,7 +23,7 @@ Use ``--skip-existing`` to skip a modality+architecture if its output CSV alread
 Use ``--results-subdir NAME`` to write default CSV paths and the default embeddings directory under
 ``runs/NAME/`` so a new window length does not overwrite or falsely skip against an older ``runs/`` tree.
 
-Example::
+Example:
 
     python scripts/benchmark_swell_waveform_loso.py --architecture gru --modality eda \\
         --data-root data/processed_swell_waveform
@@ -43,6 +43,8 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import inspect
+import math
 import sys
 from pathlib import Path
 
@@ -131,6 +133,33 @@ def _best_threshold_f1(y_true: np.ndarray, probs: np.ndarray, n_steps: int = 49)
     return best_t
 
 
+def _best_threshold_balanced(
+    y_true: np.ndarray, probs: np.ndarray, objective: str = "bacc", n_steps: int = 49
+) -> float:
+    """Threshold that maximizes balanced accuracy or Youden's J.
+
+    Unlike F1, these objectives drop to ~0 when the model predicts a single class
+    (specificity becomes 0), so the tuner cannot 'cheat' by calling everything stress.
+    """
+    y_true = np.asarray(y_true, dtype=np.int64)
+    probs = np.asarray(probs, dtype=np.float64)
+    if len(y_true) < 2 or len(np.unique(y_true)) < 2:
+        return 0.5
+    best_t, best_score = 0.5, -1.0
+    for t in np.linspace(0.02, 0.98, n_steps):
+        pred = (probs >= t).astype(np.int64)
+        sens = float(
+            recall_score(y_true, pred, labels=[0, 1], average="binary", pos_label=1, zero_division=0)
+        )
+        spec = float(
+            recall_score(y_true, pred, labels=[0, 1], average="binary", pos_label=0, zero_division=0)
+        )
+        score = 0.5 * (sens + spec) if objective == "bacc" else (sens + spec - 1.0)
+        if score > best_score or (score == best_score and abs(t - 0.5) < abs(best_t - 0.5)):
+            best_score, best_t = score, float(t)
+    return best_t
+
+
 def _majority_train_label(y_tr: np.ndarray) -> int:
     if len(y_tr) == 0:
         return 0
@@ -151,11 +180,40 @@ def _majority_baseline_metrics(y_te: np.ndarray, y_tr: np.ndarray) -> tuple[int,
 def _parse_conv_channels(s: str) -> list[int]:
     parts = [p.strip() for p in s.split(",") if p.strip()]
     if not parts:
-        raise ValueError("--conv-channels must be a comma-separated list, e.g. 32,32")
+        raise ValueError("--conv-channels must be a comma-separated list, e.g. 64,64")
     return [int(p) for p in parts]
 
 
-def _load_waveform_subject(path: Path, modality: str) -> tuple[np.ndarray, np.ndarray]:
+def _parse_conv_kernels(s: str) -> list[int]:
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("--conv-kernels must be a comma-separated list, e.g. 7,5")
+    return [int(p) for p in parts]
+
+
+def _downsample_windows(X: np.ndarray, orig_hz: float, target_hz: float) -> np.ndarray:
+    """Anti-aliased resample of (N, T) windows from ``orig_hz`` to ``target_hz``.
+
+    No-op when target is missing, non-positive, or not below the original rate.
+    """
+    if target_hz is None or target_hz <= 0 or orig_hz <= 0 or target_hz >= orig_hz:
+        return X
+    if X.shape[0] == 0 or X.shape[1] == 0:
+        return X
+    from scipy.signal import resample_poly
+
+    up = int(round(target_hz))
+    down = int(round(orig_hz))
+    g = math.gcd(up, down) or 1
+    up //= g
+    down //= g
+    Xd = resample_poly(X, up, down, axis=1)
+    return np.ascontiguousarray(Xd, dtype=np.float32)
+
+
+def _load_waveform_subject(
+    path: Path, modality: str, downsample_hz: float | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     d = torch.load(path, weights_only=False, map_location="cpu")
     if d.get("kind") != "swell_waveform":
         raise ValueError(f"Expected kind swell_waveform in {path}, got {d.get('kind')!r}")
@@ -171,7 +229,15 @@ def _load_waveform_subject(path: Path, modality: str) -> tuple[np.ndarray, np.nd
         X = w[:, :, ch]
     y = np.asarray(d["labels"], dtype=np.int64)
     valid = np.isfinite(X).all(axis=1)
-    return X[valid], y[valid]
+    X, y = X[valid], y[valid]
+    if downsample_hz is not None and len(X):
+        orig_hz = float(d.get("sample_rate_hz") or 0.0)
+        if orig_hz <= 0:
+            wsec = float(d.get("win_sec") or 0.0)
+            if wsec > 0:
+                orig_hz = X.shape[1] / wsec
+        X = _downsample_windows(X, orig_hz, float(downsample_hz))
+    return X, y
 
 
 def _fit_scaler(xs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
@@ -195,36 +261,54 @@ def _build_model(
     conv_channels: list[int],
     conv_kernel: int,
     *,
+    conv_style: str = "physio",
+    conv_kernels: list[int] | None = None,
+    conv_pool: int = 4,
     pool: str = "last",
     input_norm: bool = True,
     head: str = "linear",
 ) -> nn.Module:
+    def _supported_kwargs(cls: type[nn.Module], kwargs: dict) -> dict:
+        params = inspect.signature(cls.__init__).parameters
+        return {k: v for k, v in kwargs.items() if k in params}
+
     if architecture == "linear":
         return SwellFlattenLinearClassifier(seq_len=win_samples, input_dim=1, num_classes=2)
     if architecture == "gru":
-        return SwellGruClassifier(
-            input_dim=1,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            dropout=dropout,
-            num_classes=2,
-            pool=pool,  # type: ignore[arg-type]
-            input_norm=input_norm,
-            head=head,  # type: ignore[arg-type]
+        kwargs = _supported_kwargs(
+            SwellGruClassifier,
+            {
+                "input_dim": 1,
+                "hidden_dim": hidden_dim,
+                "num_layers": num_layers,
+                "dropout": dropout,
+                "num_classes": 2,
+                "pool": pool,
+                "input_norm": input_norm,
+                "head": head,
+            },
         )
+        return SwellGruClassifier(**kwargs)
     if architecture == "cnn_gru":
-        return SwellCnnGruClassifier(
-            input_dim=1,
-            conv_channels=conv_channels,
-            kernel_size=conv_kernel,
-            gru_hidden=hidden_dim,
-            gru_layers=num_layers,
-            dropout=dropout,
-            num_classes=2,
-            pool=pool,  # type: ignore[arg-type]
-            input_norm=input_norm,
-            head=head,  # type: ignore[arg-type]
+        kwargs = _supported_kwargs(
+            SwellCnnGruClassifier,
+            {
+                "input_dim": 1,
+                "conv_channels": conv_channels,
+                "kernel_size": conv_kernel,
+                "gru_hidden": hidden_dim,
+                "gru_layers": num_layers,
+                "dropout": dropout,
+                "num_classes": 2,
+                "conv_style": conv_style,
+                "conv_kernels": conv_kernels,
+                "conv_pool": conv_pool,
+                "pool": pool,
+                "input_norm": input_norm,
+                "head": head,
+            },
         )
+        return SwellCnnGruClassifier(**kwargs)
     raise ValueError(f"Unknown architecture: {architecture}")
 
 
@@ -377,8 +461,9 @@ def run_loso(args: argparse.Namespace) -> None:
 
     subj_data: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     win_ref: int | None = None
+    downsample_hz = getattr(args, "downsample_hz", None)
     for sid, p in zip(subjects, files):
-        X, y = _load_waveform_subject(p, modality)
+        X, y = _load_waveform_subject(p, modality, downsample_hz=downsample_hz)
         if win_ref is None:
             win_ref = int(X.shape[1])
         elif int(X.shape[1]) != win_ref:
@@ -386,16 +471,32 @@ def run_loso(args: argparse.Namespace) -> None:
         subj_data[sid] = (X, y)
 
     conv_channels = _parse_conv_channels(args.conv_channels) if architecture == "cnn_gru" else [32, 32]
+    conv_kernels = (
+        _parse_conv_kernels(args.conv_kernels) if architecture == "cnn_gru" else None
+    )
+    if architecture == "cnn_gru" and getattr(args, "cnn_gru_style", "physio") == "physio":
+        if conv_kernels is not None and len(conv_kernels) != len(conv_channels):
+            raise ValueError(
+                f"--conv-kernels ({len(conv_kernels)}) must match --conv-channels ({len(conv_channels)})"
+            )
 
+    ds_note = f" | downsample_hz={downsample_hz}" if downsample_hz else ""
+    cnn_note = ""
+    if architecture == "cnn_gru":
+        cnn_note = (
+            f" | cnn={getattr(args, 'cnn_gru_style', 'physio')}"
+            f" ch={conv_channels} k={conv_kernels or args.conv_kernel}"
+        )
     print(
         f"SWELL waveform LOSO | modality={modality} | arch={architecture} | "
-        f"subjects={subjects} | W={win_ref} | H={args.hidden_dim} | pool={args.pool} | "
+        f"subjects={subjects} | W={win_ref}{ds_note}{cnn_note} | H={args.hidden_dim} | pool={args.pool} | "
         f"head={args.head} | device={device}"
     )
     if getattr(args, "smoke_test", False):
         print("  (smoke-test: short run for wiring checks; metrics are not meaningful)")
 
     rows: list[dict] = []
+    prediction_rows: list[dict] = []
     embedding_files_written: list[str] = []
     for held_out in subjects:
         train_ids_all = [sid for sid in subjects if sid != held_out]
@@ -456,6 +557,9 @@ def run_loso(args: argparse.Namespace) -> None:
             args.dropout,
             conv_channels,
             args.conv_kernel,
+            conv_style=getattr(args, "cnn_gru_style", "physio"),
+            conv_kernels=conv_kernels,
+            conv_pool=getattr(args, "conv_pool", 4),
             pool=args.pool,
             input_norm=not args.no_input_norm,
             head=args.head,
@@ -507,14 +611,19 @@ def run_loso(args: argparse.Namespace) -> None:
             model.load_state_dict(best_state)
 
         if (
-            args.decision_threshold_tune == "f1_val"
+            args.decision_threshold_tune != "none"
             and val_loader is not None
             and len(y_va) >= 2
             and len(np.unique(y_va)) >= 2
         ):
             y_val_np, p_val_np = _collect_probs_torch(model, val_loader, device)
             if len(np.unique(y_val_np)) >= 2:
-                eval_threshold = _best_threshold_f1(y_val_np, p_val_np)
+                if args.decision_threshold_tune == "f1_val":
+                    eval_threshold = _best_threshold_f1(y_val_np, p_val_np)
+                elif args.decision_threshold_tune == "bacc_val":
+                    eval_threshold = _best_threshold_balanced(y_val_np, p_val_np, objective="bacc")
+                elif args.decision_threshold_tune == "youden_val":
+                    eval_threshold = _best_threshold_balanced(y_val_np, p_val_np, objective="youden")
 
         _, acc, f1, prec, rec = _evaluate(model, test_loader, device, eval_threshold)
         if len(y_te) > 0:
@@ -533,6 +642,27 @@ def run_loso(args: argparse.Namespace) -> None:
 
         Z_te, y_enc_te = _collect_encoder(model, test_loader, device)
         _, p_te = _collect_probs_torch(model, test_loader, device)
+        if len(y_te) == len(pred_model) == len(p_te):
+            for window_index, y_true, y_pred, p_stress in zip(
+                np.arange(len(y_te), dtype=np.int64),
+                y_te,
+                pred_model,
+                p_te,
+                strict=True,
+            ):
+                prediction_rows.append(
+                    {
+                        "subject": int(held_out),
+                        "modality": modality,
+                        "architecture": architecture,
+                        "window_index": int(window_index),
+                        "y_true": int(y_true),
+                        "y_pred": int(y_pred),
+                        "p_stress": float(p_stress),
+                        "decision_threshold": float(eval_threshold),
+                        "win_samples": int(win_ref),
+                    }
+                )
 
         if args.save_embeddings:
             emb_root = Path(args.embeddings_dir)
@@ -610,6 +740,10 @@ def run_loso(args: argparse.Namespace) -> None:
     pd.DataFrame(rows).to_csv(out_csv, index=False)
     print(f"\nWrote {out_csv}")
 
+    pred_csv = out_csv.with_name(f"{out_csv.stem}_predictions{out_csv.suffix}")
+    pd.DataFrame(prediction_rows).to_csv(pred_csv, index=False)
+    print(f"Wrote {pred_csv}")
+
     if args.save_embeddings:
         emb_root = Path(args.embeddings_dir)
         manifest = {
@@ -655,15 +789,32 @@ def main() -> None:
         action="store_true",
         help="If the output CSV for this modality+architecture already exists and is non-empty, skip that run.",
     )
-    parser.add_argument("--hidden-dim", type=int, default=16, help="GRU hidden size (default 16, compact)")
+    parser.add_argument("--hidden-dim", type=int, default=64, help="GRU hidden size (64 for physio CNN-GRU)")
     parser.add_argument("--num-layers", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument(
-        "--conv-channels",
-        default="16",
-        help="cnn_gru: comma-separated Conv1d widths; default single layer 16",
+        "--cnn-gru-style",
+        choices=["legacy", "physio"],
+        default="physio",
+        help="cnn_gru trunk: physio = two Conv-BN-ReLU-MaxPool blocks (paper); legacy = length-preserving conv stack.",
     )
-    parser.add_argument("--conv-kernel", type=int, default=3)
+    parser.add_argument(
+        "--conv-channels",
+        default="64,64",
+        help="cnn_gru: comma-separated Conv1d output widths per block (default 64,64 for physio).",
+    )
+    parser.add_argument(
+        "--conv-kernels",
+        default="7,5",
+        help="cnn_gru physio: comma-separated kernel sizes per block (default 7,5). Ignored for legacy style.",
+    )
+    parser.add_argument(
+        "--conv-pool",
+        type=int,
+        default=4,
+        help="cnn_gru physio: MaxPool1d factor after each block (default 4 → 16× total length reduction).",
+    )
+    parser.add_argument("--conv-kernel", type=int, default=3, help="cnn_gru legacy: shared kernel size for all conv layers.")
     parser.add_argument(
         "--pool",
         choices=["attn", "last"],
@@ -691,6 +842,13 @@ def main() -> None:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "mps", "cuda"])
     parser.add_argument("--max-subjects", type=int, default=None)
     parser.add_argument(
+        "--downsample-hz",
+        type=float,
+        default=None,
+        help="Anti-aliased downsample of raw waveform windows to this rate (e.g. 128) before "
+        "training. Shortens long high-rate ECG sequences so the GRU is learnable. No-op if >= original rate.",
+    )
+    parser.add_argument(
         "--smoke-test",
         action="store_true",
         help="Quick sanity check: epochs=1, patience=1, cap to first 4 subjects (unless --max-subjects set). "
@@ -706,8 +864,11 @@ def main() -> None:
     parser.add_argument("--decision-threshold", type=float, default=0.5)
     parser.add_argument(
         "--decision-threshold-tune",
-        choices=["none", "f1_val"],
+        choices=["none", "f1_val", "bacc_val", "youden_val"],
         default="none",
+        help="Pick the decision threshold on the validation split. f1_val maximizes F1 (can "
+        "collapse to all-positive when classes are balanced); bacc_val/youden_val maximize "
+        "balanced accuracy / Youden's J, which penalize predicting a single class.",
     )
     parser.add_argument("--no-save-embeddings", action="store_true", help="Skip writing per-fold npz files")
     parser.add_argument("--save-train-embeddings", action="store_true", help="Also save inner-train Z per fold (large)")

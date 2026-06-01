@@ -292,6 +292,11 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated subject ids to omit from LOSO (e.g. 7,8,11,23).",
     )
     parser.add_argument("--out-csv", default=None)
+    parser.add_argument(
+        "--out-predictions-csv",
+        default=None,
+        help="Optional long CSV of per-minute y_true/y_pred/p_stress. Defaults to <out-csv stem>_predictions.csv.",
+    )
     parser.add_argument("--decision-threshold", type=float, default=0.5)
     parser.add_argument(
         "--decision-threshold-tune",
@@ -353,6 +358,7 @@ def main() -> None:
     )
 
     rows = []
+    prediction_rows = []
     for held_out in subjects:
         train_ids_all = [sid for sid in subjects if sid != held_out]
         train_ids, val_ids = _split_train_val_subjects(train_ids_all, seed=args.seed + held_out)
@@ -370,7 +376,8 @@ def main() -> None:
 
         sk_class_weight = "balanced" if args.class_weight == "balanced" else None
         eval_threshold = float(args.decision_threshold)
-        pred_model = np.zeros((0,), dtype=np.int64)
+        probs = np.full(len(y_te), np.nan, dtype=np.float64)
+        pred_model = np.zeros(len(y_te), dtype=np.int64)
 
         if len(y_tr_lr) == 0 or len(y_te) == 0:
             acc, f1, prec, rec = 0.0, 0.0, 0.0, 0.0
@@ -392,9 +399,17 @@ def main() -> None:
         maj_label, maj_acc, maj_f1, maj_prec, maj_rec = _majority_baseline_metrics(y_te, y_tr_inner)
         train_stress_pct = float(np.mean(y_tr_inner == 1) * 100.0) if len(y_tr_inner) else 0.0
         spec, bacc, pstress = _diagnostic_metrics(y_te, pred_model) if len(pred_model) == len(y_te) else (0.0, 0.0, 0.0)
+        tn = int(np.sum((y_te == 0) & (pred_model == 0)))
+        fp = int(np.sum((y_te == 0) & (pred_model == 1)))
+        fn = int(np.sum((y_te == 1) & (pred_model == 0)))
+        tp = int(np.sum((y_te == 1) & (pred_model == 1)))
 
         row = {
             "subject": held_out,
+            "tn": tn,
+            "fp": fp,
+            "fn": fn,
+            "tp": tp,
             "accuracy": float(acc),
             "f1": float(f1),
             "precision": float(prec),
@@ -413,6 +428,23 @@ def main() -> None:
             "maj_recall": float(maj_rec),
         }
         rows.append(row)
+        for minute_index, y_true, y_pred, p_stress in zip(
+            np.arange(len(y_te), dtype=np.int64),
+            y_te,
+            pred_model,
+            probs,
+            strict=True,
+        ):
+            prediction_rows.append(
+                {
+                    "subject": held_out,
+                    "minute_index": int(minute_index),
+                    "y_true": int(y_true),
+                    "y_pred": int(y_pred),
+                    "p_stress": float(p_stress),
+                    "decision_threshold": float(eval_threshold),
+                }
+            )
         warn = ""
         if pstress >= 95.0 and rec >= 0.99:
             warn = " | WARN: near-all-stress predictions (recall~=1)"
@@ -441,6 +473,10 @@ def main() -> None:
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "subject",
+        "tn",
+        "fp",
+        "fn",
+        "tp",
         "accuracy",
         "f1",
         "precision",
@@ -465,6 +501,10 @@ def main() -> None:
         writer.writerow(
             {
                 "subject": "MEAN+/-STD",
+                "tn": "",
+                "fp": "",
+                "fn": "",
+                "tp": "",
                 "accuracy": f"{acc.mean():.6f}+/-{acc.std():.6f}",
                 "f1": f"{f1.mean():.6f}+/-{f1.std():.6f}",
                 "precision": f"{pr.mean():.6f}+/-{pr.std():.6f}",
@@ -489,6 +529,21 @@ def main() -> None:
     print(f"mean_balanced_accuracy: {bacc.mean():.3f} +/- {bacc.std():.3f}")
     print(f"mean_majority_f1: {maj_f1.mean():.3f} +/- {maj_f1.std():.3f} (train-label majority baseline)")
     print(f"saved_csv: {out_csv}")
+
+    pred_csv = (
+        Path(args.out_predictions_csv)
+        if args.out_predictions_csv is not None
+        else out_csv.with_name(f"{out_csv.stem}_predictions{out_csv.suffix}")
+    )
+    pred_csv.parent.mkdir(parents=True, exist_ok=True)
+    with pred_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["subject", "minute_index", "y_true", "y_pred", "p_stress", "decision_threshold"],
+        )
+        writer.writeheader()
+        writer.writerows(prediction_rows)
+    print(f"saved_predictions_csv: {pred_csv}")
 
 
 if __name__ == "__main__":
