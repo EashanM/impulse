@@ -384,16 +384,6 @@ Use `--downsample-hz 128` on ECG if windows are too long at native Poly5 rate (~
 
 ---
 
-## 5. Visualization (confusion matrices & AUROC)
-
-| File | Role |
-|---|---|
-| `notebooks/albaladejo_w210_s60_confusion_auroc.ipynb` | Load `runs/*_predictions.csv`, plot CM / ROC per model; combined paper figures |
-
-Point the notebook at your prediction CSVs under `runs/` (Albaladejo, minute-level, raw waveform predictions).
-
----
-
 ## Output file naming cheat sheet
 
 | Pattern | Meaning |
